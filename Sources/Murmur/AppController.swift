@@ -35,7 +35,22 @@ final class AppController: NSObject, NSApplicationDelegate {
         } else {
             setStatus("⚠︎ Grant Input Monitoring, then relaunch")
         }
+        ensureLoginItem()
         Log.info("permissions — inputMonitoring: \(CGPreflightListenEventAccess()), accessibility: \(AXIsProcessTrusted())")
+    }
+
+    // Auto-start at login so the hotkeys are always available — the app is useless when not running.
+    private func ensureLoginItem() {
+        guard SMAppService.mainApp.status != .enabled else {
+            Log.info("login item already enabled")
+            return
+        }
+        do {
+            try SMAppService.mainApp.register()
+            Log.info("registered as login item")
+        } catch {
+            Log.error("login item register failed: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Hotkeys

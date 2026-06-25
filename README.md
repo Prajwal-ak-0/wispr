@@ -70,7 +70,8 @@ the Applications folder.
 
 A small pill appears while recording, with bars that react to your voice.
 
-Optional: menu-bar mic icon → **Start at Login** to launch Murmur automatically.
+Murmur adds itself to your Login Items on first launch, so it's always running and the hotkeys are
+always available. You can turn this off from the menu-bar mic icon → **Start at Login**.
 
 ## How it works
 
