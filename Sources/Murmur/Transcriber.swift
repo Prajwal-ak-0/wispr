@@ -11,6 +11,7 @@ final class LiveTranscriber {
     private var collector: Task<String, Error>?
 
     private(set) var analyzerFormat: AVAudioFormat?
+    private var assetsInstalled = false
 
     // Install the language model assets up front so the first recording is instant.
     func prepareAssets() async throws {
@@ -25,6 +26,7 @@ final class LiveTranscriber {
         } else {
             Log.info("speech assets already present")
         }
+        assetsInstalled = true
     }
 
     // Begin a new transcription session. Returns the audio format buffers must be fed in.
@@ -33,9 +35,10 @@ final class LiveTranscriber {
                                   transcriptionOptions: [],
                                   reportingOptions: [],
                                   attributeOptions: [])
-        if let request = try await AssetInventory.assetInstallationRequest(supporting: [t]) {
+        if !assetsInstalled, let request = try await AssetInventory.assetInstallationRequest(supporting: [t]) {
             try await request.downloadAndInstall()
         }
+        assetsInstalled = true
 
         let a = SpeechAnalyzer(modules: [t])
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [t]) else {
@@ -66,15 +69,48 @@ final class LiveTranscriber {
         inputCont?.yield(AnalyzerInput(buffer: buffer))
     }
 
-    // Finish the stream, finalize, and return the full transcript.
-    func finish() async throws -> String {
+    // Finish the stream, finalize, and return the transcript. Bounded so it can NEVER hang the UI:
+    // if finalization stalls (rare — e.g. an unusual input format), it gives up after a timeout
+    // and returns what it has (or empty), letting the app return to idle.
+    func finish() async -> String {
+        let analyzer = self.analyzer
+        let collector = self.collector
         inputCont?.finish()
-        if let a = analyzer {
-            try await a.finalizeAndFinishThroughEndOfInput()
-        }
-        let text = (try await collector?.value) ?? ""
         reset()
+        guard analyzer != nil || collector != nil else { return "" }
+
+        let (completed, text) = await withTaskGroup(of: (Bool, String).self) { group -> (Bool, String) in
+            group.addTask {
+                do {
+                    if let analyzer { try await analyzer.finalizeAndFinishThroughEndOfInput() }
+                    return (true, (try await collector?.value) ?? "")
+                } catch {
+                    return (true, "")
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                return (false, "")   // timed out
+            }
+            defer { group.cancelAll() }
+            return await group.next() ?? (false, "")
+        }
+        if !completed, let analyzer {
+            // finalize stalled — force the analyzer to release the on-device speech pipeline
+            Task.detached { try? await analyzer.cancelAndFinishNow() }
+        }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // Tear down the current session immediately without waiting — used by the universal reset.
+    func cancel() {
+        let analyzer = self.analyzer
+        inputCont?.finish()
+        collector?.cancel()
+        reset()
+        if let analyzer {
+            Task.detached { try? await analyzer.cancelAndFinishNow() }
+        }
     }
 
     private func reset() {
@@ -113,6 +149,6 @@ final class LiveTranscriber {
         }
         if let err { throw err }
         feed(outBuf)
-        return try await finish()
+        return await finish()
     }
 }

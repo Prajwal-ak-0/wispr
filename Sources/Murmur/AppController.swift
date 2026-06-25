@@ -13,7 +13,7 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     private var state: RecordState = .idle
     private var pushToTalk = false
-    private var cancelRequested = false
+    private var runID = 0
     private var activeBundleID: String?
     private var activeAppName: String?
 
@@ -61,7 +61,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             switch self.state {
             case .idle: self.startRecording(pushToTalk: false)
             case .recording: self.stopRecordingAndProcess()
-            case .processing: break
+            case .processing: break   // finishing (bounded); Esc force-cancels if needed
             }
         }
         hotkeys.onPushToTalkStart = { [weak self] in
@@ -74,25 +74,24 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
         hotkeys.onPushToTalkAbort = { [weak self] in
             guard let self, self.state == .recording, self.pushToTalk else { return }
-            self.abortRecording()
+            self.reset()
         }
-        hotkeys.onCancel = { [weak self] in
-            guard let self else { return }
-            switch self.state {
-            case .recording: self.abortRecording()
-            case .processing: self.cancelRequested = true
-            case .idle: break
-            }
-        }
+        // Esc is a universal escape hatch — always returns to idle, from any state.
+        hotkeys.onCancel = { [weak self] in self?.reset() }
     }
 
     // MARK: - Recording pipeline
+    //
+    // `runID` bumps on every start and every reset. Each async step re-checks it before touching
+    // shared state, so a stale task (superseded by Esc, a new recording, or a timeout) can never
+    // paste, clobber state, or wedge the UI.
 
     private func startRecording(pushToTalk: Bool) {
         guard state == .idle else { return }
+        runID += 1
+        let run = runID
         state = .recording
         self.pushToTalk = pushToTalk
-        cancelRequested = false
         let front = NSWorkspace.shared.frontmostApplication
         activeBundleID = front?.bundleIdentifier
         activeAppName = front?.localizedName
@@ -102,57 +101,61 @@ final class AppController: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             do {
                 let format = try await transcriber.startSession()
+                guard runID == run, state == .recording else {
+                    transcriber.cancel()   // superseded during setup — never leave a hot mic
+                    return
+                }
                 recorder.onBuffer = { [weak self] buffer in self?.transcriber.feed(buffer) }
                 recorder.onLevels = { [weak self] rms, bands in self?.overlay.setLevels(rms: rms, bands: bands) }
                 try recorder.start(targetFormat: format)
             } catch {
                 Log.error("failed to start recording: \(error.localizedDescription)")
-                self.abortRecording()
+                if runID == run { reset() }
             }
         }
     }
 
     private func stopRecordingAndProcess() {
         guard state == .recording else { return }
+        let run = runID
         state = .processing
         overlay.show(.processing)
         setStatus("Transcribing…")
         recorder.stop()
 
         Task { @MainActor in
-            do {
-                let raw = try await transcriber.finish()
-                Log.info("transcribed \(raw.count) chars")
-                guard !raw.isEmpty else { return finishProcessing(nil) }
-                let style = Config.style(bundleID: activeBundleID, appName: activeAppName)
-                Log.info("formatting with '\(style.name)' style for \(activeAppName ?? "unknown app")")
-                let formatted = await TextFormatter.format(raw, style: style)
-                Log.info("formatted \(formatted.count) chars")
-                finishProcessing(formatted)
-            } catch {
-                Log.error("transcription failed: \(error.localizedDescription)")
-                finishProcessing(nil)
-            }
+            let raw = await transcriber.finish()   // bounded — never hangs
+            guard runID == run, state == .processing else { return Log.info("result superseded — dropped") }
+            Log.info("transcribed \(raw.count) chars")
+            guard !raw.isEmpty else { return finishProcessing(nil, run: run) }
+            let style = Config.style(bundleID: activeBundleID, appName: activeAppName)
+            Log.info("formatting with '\(style.name)' style for \(activeAppName ?? "unknown app")")
+            let formatted = await TextFormatter.format(raw, style: style)
+            guard runID == run, state == .processing else { return Log.info("result superseded — dropped") }
+            Log.info("formatted \(formatted.count) chars")
+            finishProcessing(formatted, run: run)
         }
     }
 
-    private func finishProcessing(_ text: String?) {
+    private func finishProcessing(_ text: String?, run: Int) {
+        guard runID == run else { return }
         overlay.hide()
         state = .idle
         pushToTalk = false
         setStatus("Ready · ⌘⌘ toggle · hold ⌥")
-        let cancelled = cancelRequested
-        cancelRequested = false
-        if !cancelled, let text, !text.isEmpty { Paster.paste(text) }
+        if let text, !text.isEmpty { Paster.paste(text) }
     }
 
-    private func abortRecording() {
+    // Universal reset: stop everything and return to idle, regardless of current state.
+    private func reset() {
+        runID += 1   // invalidate any in-flight start/processing task
         recorder.stop()
+        transcriber.cancel()
         overlay.hide()
         state = .idle
         pushToTalk = false
-        cancelRequested = false
         setStatus("Ready · ⌘⌘ toggle · hold ⌥")
+        Log.info("reset")
     }
 
     // MARK: - Permissions

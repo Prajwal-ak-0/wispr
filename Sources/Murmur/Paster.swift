@@ -6,19 +6,28 @@ enum Paster {
     private static let pasteboard = NSPasteboard.general
 
     static func paste(_ text: String) {
-        let previous = pasteboard.string(forType: .string)
+        let saved = snapshot()   // preserve ALL clipboard contents (text, images, files…)
 
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
         synthesizeCommandV()
 
-        // Restore the user's clipboard shortly after the paste lands.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        // Restore the user's clipboard once the paste has landed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             pasteboard.clearContents()
-            if let previous {
-                pasteboard.setString(previous, forType: .string)
+            if !saved.isEmpty { pasteboard.writeObjects(saved) }
+        }
+    }
+
+    private static func snapshot() -> [NSPasteboardItem] {
+        guard let items = pasteboard.pasteboardItems else { return [] }
+        return items.map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) { copy.setData(data, forType: type) }
             }
+            return copy
         }
     }
 
