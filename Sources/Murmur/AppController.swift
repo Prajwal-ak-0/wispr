@@ -16,11 +16,16 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var runID = 0
     private var activeBundleID: String?
     private var activeAppName: String?
+    private var recordOnlyInTextFields = true
+    private static let textGateKey = "recordOnlyInTextFields"
 
     private var statusItem: NSStatusItem!
     private var statusLine: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let saved = UserDefaults.standard.object(forKey: Self.textGateKey) as? Bool {
+            recordOnlyInTextFields = saved
+        }
         buildMenu()
         requestPermissions()
 
@@ -88,6 +93,10 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     private func startRecording(pushToTalk: Bool) {
         guard state == .idle else { return }
+        if recordOnlyInTextFields, !FocusInspector.isTextInputFocused() {
+            Log.info("hotkey ignored — no editable text field focused")
+            return
+        }
         runID += 1
         let run = runID
         state = .recording
@@ -193,6 +202,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         menu.addItem(pttHint)
         menu.addItem(.separator())
 
+        let textGate = NSMenuItem(title: "Record only in text fields",
+                                  action: #selector(toggleTextGate), keyEquivalent: "")
+        textGate.state = recordOnlyInTextFields ? .on : .off
+        menu.addItem(textGate)
         menu.addItem(NSMenuItem(title: "Open Permission Settings…",
                                 action: #selector(openPermissions), keyEquivalent: ""))
         let loginItem = NSMenuItem(title: "Start at Login",
@@ -232,6 +245,13 @@ final class AppController: NSObject, NSApplicationDelegate {
         } catch {
             Log.error("login item toggle failed: \(error.localizedDescription)")
         }
+    }
+
+    @objc private func toggleTextGate(_ sender: NSMenuItem) {
+        recordOnlyInTextFields.toggle()
+        sender.state = recordOnlyInTextFields ? .on : .off
+        UserDefaults.standard.set(recordOnlyInTextFields, forKey: Self.textGateKey)
+        Log.info("record only in text fields: \(recordOnlyInTextFields)")
     }
 
     @objc private func openLog() {
