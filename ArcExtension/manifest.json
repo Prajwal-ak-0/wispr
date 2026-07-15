@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Murmur for Google Meet",
+  "version": "2.0.0",
+  "description": "Starts and stops local Murmur meeting capture when you join or leave Google Meet.",
+  "icons": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png" },
+  "permissions": [],
+  "host_permissions": ["http://127.0.0.1:49413/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{
+    "matches": ["https://meet.google.com/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }]
+}

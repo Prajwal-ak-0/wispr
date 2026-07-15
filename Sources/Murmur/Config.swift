@@ -14,6 +14,9 @@ enum Config {
     static let cleanTapMaxDuration = 0.50  // a "tap" is a press+release shorter than this
     static let pttArmDelay = 0.18          // hold ⌥ alone this long before push-to-talk arms
 
+    // Emergency backstop only. Long dictations must never be silently discarded.
+    static let maxRecordingSeconds = 3 * 60 * 60.0
+
     // formatter
     static let formatTemperature = 0.0
 

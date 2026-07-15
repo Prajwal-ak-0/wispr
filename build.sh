@@ -8,11 +8,13 @@ BUNDLE_ID="ai.murmur.app"
 TARGET="arm64-apple-macos26.0"
 BUILD_DIR="build"
 APP="$BUILD_DIR/$APP_NAME.app"
+MODULE_CACHE="${TMPDIR:-/tmp}/murmur-module-cache"
 
 echo "==> compiling"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 swiftc \
+    -module-cache-path "$MODULE_CACHE" \
     -swift-version 5 \
     -target "$TARGET" \
     -O \
@@ -25,6 +27,7 @@ mv "$BUILD_DIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 
 if [ ! -f Resources/Murmur.icns ] && command -v rsvg-convert >/dev/null; then ./make-icon.sh; fi
 if [ -f Resources/Murmur.icns ]; then cp Resources/Murmur.icns "$APP/Contents/Resources/Murmur.icns"; fi
+if [ -d ArcExtension ]; then ditto ArcExtension "$APP/Contents/Resources/ArcExtension"; fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -45,6 +48,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>Murmur transcribes your speech locally to type it for you.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Murmur transcribes your speech on-device.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Murmur records meeting system audio locally. It does not record or upload video.</string>
 </dict>
 </plist>
 PLIST

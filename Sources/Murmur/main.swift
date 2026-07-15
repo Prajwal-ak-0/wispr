@@ -70,6 +70,54 @@ func runFormatTest(_ arguments: [String]) {
     CFRunLoopRun()
 }
 
+func runMeetingProviderTest(_ arguments: [String]) {
+    guard let index = arguments.firstIndex(of: "--meeting-provider-test"), index + 1 < arguments.count else {
+        print("usage: Murmur --meeting-provider-test codex|claude|gemini")
+        exit(2)
+    }
+    let provider: MeetingSummaryProvider
+    switch arguments[index + 1].lowercased() {
+    case "codex": provider = .codex
+    case "claude": provider = .claude
+    case "gemini": provider = .gemini
+    default: print("unknown provider"); exit(2)
+    }
+    Task {
+        do {
+            let result = try await MeetingLLMService().summarize(
+                transcript: "[00:00:01] You: The synthetic test decision is to ship Friday.",
+                provider: provider)
+            print(result)
+            exit(0)
+        } catch { print("ERROR: \(error.localizedDescription)"); exit(1) }
+    }
+    dispatchMain()
+}
+
+func runMeetingRepair(_ arguments: [String]) {
+    guard let index = arguments.firstIndex(of: "--repair-meeting"), index + 1 < arguments.count,
+          let id = UUID(uuidString: arguments[index + 1]),
+          var meeting = MeetingStore.shared.loadAll().first(where: { $0.id == id }) else {
+        print("usage: Murmur --repair-meeting <meeting-uuid>")
+        exit(2)
+    }
+    Task {
+        do {
+            meeting.transcript = try await MeetingTranscriptionService().transcribe(
+                system: meeting.systemAudioPaths.map { URL(fileURLWithPath: $0) },
+                microphone: meeting.microphoneAudioPaths.map { URL(fileURLWithPath: $0) })
+            if let provider = meeting.summaryProvider {
+                meeting.summary = try await MeetingLLMService().summarize(transcript: meeting.transcript, provider: provider)
+            }
+            meeting.error = nil
+            try MeetingStore.shared.save(meeting)
+            print("Repaired \(meeting.title): \(meeting.transcript.count) transcript characters")
+            exit(0)
+        } catch { print("ERROR: \(error.localizedDescription)"); exit(1) }
+    }
+    dispatchMain()
+}
+
 let arguments = CommandLine.arguments
 if arguments.contains("--leveltest") {
     runLevelTest(arguments)
@@ -77,10 +125,16 @@ if arguments.contains("--leveltest") {
     runFormatTest(arguments)
 } else if arguments.contains("--selftest") {
     runSelfTest(arguments)
+} else if arguments.contains("--meeting-provider-test") {
+    runMeetingProviderTest(arguments)
+} else if arguments.contains("--repair-meeting") {
+    runMeetingRepair(arguments)
 } else {
     let app = NSApplication.shared
-    let controller = AppController()
+    let controller = MainActor.assumeIsolated { AppController() }
     app.delegate = controller
-    app.setActivationPolicy(.accessory)
+    // V2 has a real dashboard. A regular activation policy keeps it visible in Cmd-Tab and the
+    // Dock while preserving the menu-bar controls used by dictation.
+    app.setActivationPolicy(.regular)
     app.run()
 }

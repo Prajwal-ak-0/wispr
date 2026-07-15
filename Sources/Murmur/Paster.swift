@@ -10,11 +10,18 @@ enum Paster {
 
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        let insertedChangeCount = pasteboard.changeCount
 
         synthesizeCommandV()
 
-        // Restore the user's clipboard once the paste has landed.
+        // Restore the user's clipboard once the paste has landed, but only if nobody copied
+        // something new in the meantime. A delayed unconditional restore would otherwise destroy
+        // a clipboard change made immediately after dictation.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard pasteboard.changeCount == insertedChangeCount else {
+                Log.info("clipboard changed after paste — preserving newer contents")
+                return
+            }
             pasteboard.clearContents()
             if !saved.isEmpty { pasteboard.writeObjects(saved) }
         }

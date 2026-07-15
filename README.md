@@ -3,6 +3,9 @@
 Local, private dictation for macOS. Press a hotkey, speak, and clean, formatted text is typed
 wherever your cursor is — fully on-device, no cloud, no subscription.
 
+Murmur V2 also records Google Meet system audio and your microphone locally, transcribes meetings
+on-device, and keeps a searchable native history. No bot joins the call.
+
 - **Speech-to-text:** Apple's on-device speech recognizer.
 - **Formatting:** a local LLM (via Ollama) removes filler words, fixes punctuation, builds lists,
   and adapts tone to the app you're typing in (casual for WhatsApp/iMessage, structured for
@@ -66,9 +69,41 @@ the Applications folder.
 - **Double-tap ⌘** → start recording; **double-tap ⌘** again → stop, format, and type it.
   (Hands-free — good for long dictation.)
 - **Hold ⌥** → push-to-talk; release to stop. (Good for quick phrases.)
+- **Space** → pause while recording; press **Space** again to resume. You can also use the
+  button on the floating recorder or the menu-bar item. Your
+  transcript is kept in memory while paused, so you can continue after an interruption.
+- **Finish** → use the checkmark on the floating recorder, the menu-bar item, or double-tap ⌘.
 - **Esc** → cancel without typing anything.
 
-A small pill appears while recording, with bars that react to your voice.
+A compact recorder appears while recording, with live voice bars and clear pause/resume and finish
+controls. Its label and the menu-bar icon reflect whether Murmur is listening, paused, or processing.
+
+## Google Meet recording
+
+### First-time setup
+
+1. From the Murmur menu-bar icon, choose **Set Up Google Meet in Arc…**.
+2. In `arc://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the
+   revealed `ArcExtension` folder.
+3. Grant Murmur **Screen & System Audio Recording** when macOS asks. Murmur captures audio only;
+   it does not save meeting video or screenshots.
+
+When **Automatically record joined Google Meets** is enabled in the dashboard settings, Murmur
+starts only after the Meet call UI shows that you joined. Hanging up, closing the tab, or losing the
+extension heartbeat safely stops recording and begins transcription.
+
+Choose **Open Dashboard…** to view meeting status, transcripts, summaries, Q&A, retention settings,
+or to start a manual meeting recording. Audio is written in five-minute crash-recoverable chunks.
+
+### Meeting summaries
+
+- **ChatGPT (Codex):** uses the locally installed Codex CLI and its existing ChatGPT login.
+- **Claude:** uses `claude -p`; sign in with `claude login` first.
+- **Gemini:** uses Gemini CLI. Configure a Gemini API key or Vertex service-account JSON, project,
+  and location from Meeting settings.
+
+Only transcript text is sent to the selected summary provider. Audio remains local. Transcription
+itself always stays on-device.
 
 Murmur adds itself to your Login Items on first launch, so it's always running and the hotkeys are
 always available. You can turn this off from the menu-bar mic icon → **Start at Login**.
@@ -90,6 +125,15 @@ All tunables — model, hotkey timing, the formatter prompt, and the per-app sty
 ```
 
 With `./setup-signing.sh` run once, rebuilds keep your permissions (no re-granting).
+
+## Tests
+
+```bash
+./Tests/run-tests.sh
+```
+
+The tests cover recording-control availability across idle, listening, paused, and processing
+states, plus app-aware formatting selection.
 
 ## Troubleshooting
 

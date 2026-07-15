@@ -2,23 +2,76 @@ import Foundation
 @preconcurrency import AVFoundation
 import Speech
 
+struct TimedTranscriptSegment: Codable, Equatable {
+    let start: Double
+    let end: Double
+    let text: String
+}
+
+// Lets exactly one of several racing tasks resume a continuation; the rest are no-ops.
+private final class ResumeOnce {
+    private let lock = NSLock()
+    private var claimed = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
+    }
+}
+
 // Wraps the on-device SpeechAnalyzer/SpeechTranscriber (macOS 26) for live dictation.
 // A fresh session is created per recording; assets are installed once.
-final class LiveTranscriber {
+//
+// Cross-thread state (feed() runs on the real-time audio thread; finish/cancel/reset run on the
+// main actor) is guarded by stateLock. Whoever CLAIMS the analyzer owns its teardown, so a
+// finalize and a force-cancel can never run against the same analyzer at the same time.
+final class LiveTranscriber: @unchecked Sendable {
+    private let stateLock = NSLock()
     private var transcriber: SpeechTranscriber?
     private var analyzer: SpeechAnalyzer?
     private var inputCont: AsyncStream<AnalyzerInput>.Continuation?
-    private var collector: Task<String, Error>?
 
+    private var collector: Task<Void, Never>?
     private(set) var analyzerFormat: AVAudioFormat?
     private var assetsInstalled = false
+
+    // Final results stream in continuously and are banked here, so we never depend on the results
+    // sequence terminating — with live mic input it reliably does NOT close after finalize.
+    private let textLock = NSLock()
+    private var collectedText = ""
+    private var collectedSegments: [TimedTranscriptSegment] = []
+    private var lastFinishedSegments: [TimedTranscriptSegment] = []
+    private func appendText(_ s: String) { textLock.lock(); collectedText += s; textLock.unlock() }
+    private func appendSegment(_ result: SpeechTranscriber.Result) {
+        let value = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        let start = result.range.start.seconds
+        let end = CMTimeRangeGetEnd(result.range).seconds
+        textLock.withLock {
+            collectedText += value
+            collectedSegments.append(TimedTranscriptSegment(start: start, end: end, text: value))
+        }
+    }
+    private func currentText() -> String { textLock.lock(); defer { textLock.unlock() }; return collectedText }
+    private func snapshotSegments() -> [TimedTranscriptSegment] { textLock.withLock { collectedSegments } }
+    private func resetText() { textLock.withLock { collectedText = ""; collectedSegments = [] } }
+
+    private func claimAnalyzer() -> SpeechAnalyzer? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        let claimed = analyzer
+        analyzer = nil
+        return claimed
+    }
+    private func currentStream() -> AsyncStream<AnalyzerInput>.Continuation? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return inputCont
+    }
 
     // Install the language model assets up front so the first recording is instant.
     func prepareAssets() async throws {
         let t = SpeechTranscriber(locale: Locale(identifier: Config.localeID),
-                                  transcriptionOptions: [],
-                                  reportingOptions: [],
-                                  attributeOptions: [])
+                                  transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [t]) {
             Log.info("downloading speech model assets…")
             try await request.downloadAndInstall()
@@ -32,9 +85,7 @@ final class LiveTranscriber {
     // Begin a new transcription session. Returns the audio format buffers must be fed in.
     func startSession() async throws -> AVAudioFormat {
         let t = SpeechTranscriber(locale: Locale(identifier: Config.localeID),
-                                  transcriptionOptions: [],
-                                  reportingOptions: [],
-                                  attributeOptions: [])
+                                  transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
         if !assetsInstalled, let request = try await AssetInventory.assetInstallationRequest(supporting: [t]) {
             try await request.downloadAndInstall()
         }
@@ -46,79 +97,89 @@ final class LiveTranscriber {
                           userInfo: [NSLocalizedDescriptionKey: "no compatible audio format"])
         }
 
-        let collectorTask = Task { () -> String in
-            var attributed = AttributedString()
-            for try await result in t.results {
-                attributed.append(result.text)
-            }
-            return String(attributed.characters)
+        resetText()
+        let collectorTask = Task { [weak self] in
+            do {
+                for try await result in t.results {
+                    self?.appendSegment(result)
+                }
+            } catch { }
         }
 
         let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream()
-        try await a.start(inputSequence: stream)
+        // Publish state BEFORE start(), so a start() failure is still cleaned up by cancel().
+        stateLock.withLock {
+            transcriber = t
+            analyzer = a
+            inputCont = cont
+        }
+        collector = collectorTask
+        analyzerFormat = format
 
-        self.transcriber = t
-        self.analyzer = a
-        self.inputCont = cont
-        self.collector = collectorTask
-        self.analyzerFormat = format
+        do {
+            try await a.start(inputSequence: stream)
+        } catch {
+            cancel()
+            throw error
+        }
         return format
     }
 
     func feed(_ buffer: AVAudioPCMBuffer) {
-        inputCont?.yield(AnalyzerInput(buffer: buffer))
+        currentStream()?.yield(AnalyzerInput(buffer: buffer))
     }
 
-    // Finish the stream, finalize, and return the transcript. Bounded so it can NEVER hang the UI:
-    // if finalization stalls (rare — e.g. an unusual input format), it gives up after a timeout
-    // and returns what it has (or empty), letting the app return to idle.
+    // Returns in ≤6s no matter what. We bank final results as they arrive and return the banked
+    // text — never waiting for the results sequence to close (it doesn't, with live mic). A wedged
+    // finalize is abandoned and force-stopped, so finish() can never hang the UI.
     func finish() async -> String {
-        let analyzer = self.analyzer
-        let collector = self.collector
-        inputCont?.finish()
-        reset()
-        guard analyzer != nil || collector != nil else { return "" }
+        let analyzer = claimAnalyzer()           // exclusive teardown ownership
+        let hadCollector = collector != nil
+        currentStream()?.finish()
+        guard analyzer != nil || hadCollector else { reset(); return "" }
 
-        let (completed, text) = await withTaskGroup(of: (Bool, String).self) { group -> (Bool, String) in
-            group.addTask {
-                do {
-                    if let analyzer { try await analyzer.finalizeAndFinishThroughEndOfInput() }
-                    return (true, (try await collector?.value) ?? "")
-                } catch {
-                    return (true, "")
-                }
+        let box = ResumeOnce()
+        let text: String = await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
+            let work = Task {
+                if let analyzer { try? await analyzer.finalizeAndFinishThroughEndOfInput() }
+                try? await Task.sleep(nanoseconds: 500_000_000)   // grace for trailing finals
+                if box.claim() { cont.resume(returning: self.currentText()) }
             }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
-                return (false, "")   // timed out
+            Task {
+                try? await Task.sleep(nanoseconds: 6_000_000_000) // hard deadline
+                guard box.claim() else { return }
+                work.cancel()
+                if let analyzer { Task.detached { await analyzer.cancelAndFinishNow() } }
+                cont.resume(returning: self.currentText())
             }
-            defer { group.cancelAll() }
-            return await group.next() ?? (false, "")
         }
-        if !completed, let analyzer {
-            // finalize stalled — force the analyzer to release the on-device speech pipeline
-            Task.detached { try? await analyzer.cancelAndFinishNow() }
-        }
+        lastFinishedSegments = snapshotSegments()
+        reset()
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    // Tear down the current session immediately without waiting — used by the universal reset.
+    // Tear down the current session immediately — used by the universal reset. If finish() already
+    // claimed the analyzer, this is a no-op for it (no double teardown).
     func cancel() {
-        let analyzer = self.analyzer
-        inputCont?.finish()
+        let analyzer = claimAnalyzer()
+        currentStream()?.finish()
         collector?.cancel()
         reset()
         if let analyzer {
-            Task.detached { try? await analyzer.cancelAndFinishNow() }
+            Task.detached { await analyzer.cancelAndFinishNow() }
         }
     }
 
     private func reset() {
+        collector?.cancel()
+        stateLock.lock()
         transcriber = nil
         analyzer = nil
         inputCont = nil
+        stateLock.unlock()
         collector = nil
         analyzerFormat = nil
+        resetText()
     }
 
     // Convenience used by --selftest: transcribe a whole audio file.
@@ -150,5 +211,10 @@ final class LiveTranscriber {
         if let err { throw err }
         feed(outBuf)
         return await finish()
+    }
+
+    func transcribeSegments(fileURL: URL) async throws -> [TimedTranscriptSegment] {
+        _ = try await transcribe(fileURL: fileURL)
+        return lastFinishedSegments
     }
 }

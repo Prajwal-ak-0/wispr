@@ -5,7 +5,7 @@ import QuartzCore
 // (every bar rises as you speak, centre tallest, with per-band spectral character);
 // processing mode is a gentle travelling shimmer. Smoothed every frame via a display link.
 final class VoiceBarsView: NSView {
-    enum Mode { case listening, processing }
+    enum Mode { case listening, paused, processing }
 
     private let barCount: Int
     private let center: Int
@@ -77,9 +77,14 @@ final class VoiceBarsView: NSView {
     @objc private func tick() {
         switch mode {
         case .listening: tickListening()
+        case .paused: tickPaused()
         case .processing: tickProcessing()
         }
         layoutBars()
+    }
+
+    private func tickPaused() {
+        for i in 0..<barCount { displayed[i] += (0.08 - displayed[i]) * 0.28 }
     }
 
     private func tickListening() {
@@ -137,15 +142,33 @@ final class VoiceBarsView: NSView {
 
 // Floating pill near the bottom of the screen that hosts the voice bars.
 final class OverlayController {
-    enum State { case listening, processing }
+    enum State { case listening, paused, processing }
 
     private var panel: NSPanel?
     private var bars: VoiceBarsView?
+    private var statusLabel: NSTextField?
+    private var pauseButton: NSButton?
+    private var finishButton: NSButton?
+
+    var onPauseResume: (() -> Void)?
+    var onFinish: (() -> Void)?
 
     func show(_ state: State) {
         if panel == nil { build() }
         guard let panel, let bars else { return }
-        bars.start(mode: state == .listening ? .listening : .processing)
+        let mode: VoiceBarsView.Mode
+        switch state {
+        case .listening: mode = .listening
+        case .paused: mode = .paused
+        case .processing: mode = .processing
+        }
+        bars.start(mode: mode)
+        statusLabel?.stringValue = state == .listening ? "Listening" : state == .paused ? "Paused" : "Polishing"
+        pauseButton?.image = NSImage(systemSymbolName: state == .paused ? "play.fill" : "pause.fill",
+                                     accessibilityDescription: state == .paused ? "Resume recording" : "Pause recording")
+        pauseButton?.toolTip = state == .paused ? "Resume recording" : "Pause recording"
+        pauseButton?.isHidden = state == .processing
+        finishButton?.isHidden = state == .processing
         position(panel)
         panel.orderFrontRegardless()
     }
@@ -154,13 +177,18 @@ final class OverlayController {
         bars?.update(rms: rms, bands: bands)
     }
 
+    func setPauseAvailable(_ available: Bool) {
+        pauseButton?.isEnabled = available
+        pauseButton?.alphaValue = available ? 1 : 0.35
+    }
+
     func hide() {
         bars?.stop()
         panel?.orderOut(nil)
     }
 
     private func build() {
-        let width: CGFloat = 132, height: CGFloat = 40
+        let width: CGFloat = 292, height: CGFloat = 52
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
@@ -169,24 +197,67 @@ final class OverlayController {
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
         let container = NSView(frame: panel.contentView!.bounds)
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(white: 0.09, alpha: 0.92).cgColor
-        container.layer?.cornerRadius = height / 2
+        container.layer?.backgroundColor = NSColor(white: 0.08, alpha: 0.94).cgColor
+        container.layer?.cornerRadius = 16
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        container.layer?.shadowColor = NSColor.black.cgColor
+        container.layer?.shadowOpacity = 0.22
+        container.layer?.shadowRadius = 18
+        container.layer?.shadowOffset = NSSize(width: 0, height: -4)
         container.layer?.masksToBounds = true
         panel.contentView = container
 
         let bars = VoiceBarsView(barCount: Config.barCount)
-        bars.frame = container.bounds
-        bars.autoresizingMask = [.width, .height]
+        bars.frame = NSRect(x: 12, y: 8, width: 82, height: 36)
         container.addSubview(bars)
+
+        let label = NSTextField(labelWithString: "Listening")
+        label.frame = NSRect(x: 104, y: 17, width: 76, height: 18)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = NSColor.white.withAlphaComponent(0.92)
+        container.addSubview(label)
+
+        let pause = makeButton(symbol: "pause.fill", description: "Pause recording",
+                               frame: NSRect(x: 194, y: 10, width: 32, height: 32),
+                               action: #selector(togglePause))
+        container.addSubview(pause)
+
+        let finish = makeButton(symbol: "checkmark", description: "Finish recording",
+                                frame: NSRect(x: 238, y: 10, width: 40, height: 32),
+                                action: #selector(finishRecording), accent: true)
+        container.addSubview(finish)
 
         self.panel = panel
         self.bars = bars
+        self.statusLabel = label
+        self.pauseButton = pause
+        self.finishButton = finish
     }
+
+    private func makeButton(symbol: String, description: String, frame: NSRect,
+                            action: Selector, accent: Bool = false) -> NSButton {
+        let button = NSButton(frame: frame)
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 9
+        button.layer?.backgroundColor = (accent ? NSColor.systemGreen.withAlphaComponent(0.82)
+                                                   : NSColor.white.withAlphaComponent(0.10)).cgColor
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
+        button.contentTintColor = .white
+        button.toolTip = description
+        button.target = self
+        button.action = action
+        return button
+    }
+
+    @objc private func togglePause() { onPauseResume?() }
+    @objc private func finishRecording() { onFinish?() }
 
     private func position(_ panel: NSPanel) {
         guard let screen = NSScreen.main else { return }

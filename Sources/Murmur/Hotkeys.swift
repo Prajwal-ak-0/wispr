@@ -12,8 +12,11 @@ final class HotkeyMonitor {
     var onPushToTalkStop: (() -> Void)?
     var onPushToTalkAbort: (() -> Void)?
     var onCancel: (() -> Void)?
+    var onPauseResume: (() -> Void)?
+    var spacePauseEnabled = false
 
     private var tap: CFMachPort?
+    private var healthTimer: Timer?
     private var previousFlags = CGEventFlags(rawValue: 0)
     private var loggedFirstEvent = false
 
@@ -32,7 +35,9 @@ final class HotkeyMonitor {
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            // An active tap lets us consume Space while it controls recording, preventing a stray
+            // space from being inserted into the document underneath the non-activating overlay.
+            options: .defaultTap,
             eventsOfInterest: CGEventMask(mask),
             callback: hotkeyCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
@@ -44,6 +49,14 @@ final class HotkeyMonitor {
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+
+        // Re-arm the tap if the system ever disables it (heavy load, fast user input, etc.) so the
+        // hotkeys — and the user's ability to dismiss the overlay — can never go permanently dead.
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self, let tap = self.tap, !CGEvent.tapIsEnabled(tap: tap) else { return }
+            Log.error("hotkey tap was disabled — re-enabling")
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
         Log.info("hotkey monitor active")
         return true
     }
@@ -61,11 +74,12 @@ final class HotkeyMonitor {
         }
     }
 
-    fileprivate func handle(type: CGEventType, event: CGEvent) {
+    @discardableResult
+    fileprivate func handle(type: CGEventType, event: CGEvent) -> Bool {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             Log.info("hotkey tap was disabled (\(type.rawValue)) — re-enabling")
             reEnableIfNeeded()
-            return
+            return false
         }
 
         if !loggedFirstEvent {
@@ -77,12 +91,19 @@ final class HotkeyMonitor {
         let now = CACurrentMediaTime()
 
         if type == .keyDown {
-            if event.getIntegerValueField(.keyboardEventKeycode) == 53 { onCancel?() } // Escape
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            if keyCode == 49, spacePauseEnabled,
+               event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                lastCmdTapTime = 0
+                onPauseResume?()
+                return true
+            }
+            if keyCode == 53 { onCancel?() } // Escape
             if flags.contains(.maskCommand) { cmdContaminated = true }
             if flags.contains(.maskAlternate) { abortPushToTalk() }
             lastCmdTapTime = 0 // any keystroke breaks a pending ⌘ double-tap
             previousFlags = flags
-            return
+            return false
         }
 
         // flagsChanged
@@ -138,6 +159,7 @@ final class HotkeyMonitor {
         }
 
         previousFlags = flags
+        return false
     }
 }
 
@@ -147,7 +169,7 @@ private func hotkeyCallback(proxy: CGEventTapProxy,
                             userInfo: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
     if let userInfo {
         let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-        monitor.handle(type: type, event: event)
+        if monitor.handle(type: type, event: event) { return nil }
     }
     return Unmanaged.passUnretained(event)
 }
