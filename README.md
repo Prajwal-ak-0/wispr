@@ -1,7 +1,8 @@
 # Murmur
 
-Local, private dictation for macOS. Press a hotkey, speak, and clean, formatted text is typed
-wherever your cursor is — fully on-device, no cloud, no subscription.
+Local, private dictation and meeting memory for macOS. Press a hotkey, speak, and clean,
+formatted text is typed wherever your cursor is. Record a Google Meet without inviting a bot,
+then search its local transcript and create a brief when you choose.
 
 Murmur V2 also records Google Meet system audio and your microphone locally, transcribes meetings
 on-device, and keeps a searchable native history. No bot joins the call.
@@ -10,7 +11,7 @@ on-device, and keeps a searchable native history. No bot joins the call.
 - **Formatting:** a local LLM (via Ollama) removes filler words, fixes punctuation, builds lists,
   and adapts tone to the app you're typing in (casual for WhatsApp/iMessage, structured for
   Slack/Teams). It only *formats* what you said — it never answers or invents content.
-- Nothing leaves your machine.
+- Dictation audio, meeting audio, and transcription stay on your Mac.
 
 > The repo is named `wispr`; the app is **Murmur**.
 
@@ -18,7 +19,11 @@ on-device, and keeps a searchable native history. No bot joins the call.
 
 - Apple Silicon Mac running macOS 26 (Tahoe) or later
 - Command Line Tools (the Swift compiler) — no Xcode needed
-- [Ollama](https://ollama.com) with the `qwen2.5:3b` model
+- [Ollama](https://ollama.com) with the `qwen2.5:3b` model for polished dictation
+- Arc, only if you want Google Meet detection
+
+Optional for AI meeting briefs and questions: a signed-in Codex CLI, Claude CLI, Gemini API key,
+or Vertex AI service account. Meetings still transcribe locally without one.
 
 ## Install
 
@@ -38,14 +43,24 @@ ollama serve               # start the local server (run in its own terminal; sk
 ollama pull qwen2.5:3b     # ~2 GB, one-time download
 ```
 
-### 3. Clone & build
+### 3. Clone, build, and launch
 
 ```bash
 git clone git@github.com:Prajwal-ak-0/wispr.git
 cd wispr
 ./setup-signing.sh   # one-time: keeps permissions across rebuilds (recommended)
 ./build.sh           # compiles and installs to /Applications/Murmur.app
+open /Applications/Murmur.app
 ```
+
+If you do not use SSH keys with GitHub, clone with:
+
+```bash
+git clone https://github.com/Prajwal-ak-0/wispr.git
+```
+
+`build.sh` prints the actual installation location. On a managed Mac where `/Applications` is not
+writable, it installs to `~/Applications/Murmur.app` instead.
 
 ### 4. Grant permissions (one time)
 
@@ -55,14 +70,18 @@ Open **System Settings → Privacy & Security** and turn **Murmur** on under eac
 2. **Input Monitoring**
 3. **Accessibility**
 
-Then **quit and reopen** the app — menu-bar mic icon → **Quit Murmur**, then:
+For Google Meet capture, also allow **Screen & System Audio Recording**. This is not required for
+dictation alone.
+
+Then **quit and reopen** Murmur — menu-bar icon → **Quit Murmur**, then:
 
 ```bash
 open /Applications/Murmur.app
 ```
 
 Input Monitoring only takes effect after a relaunch. You can also find **Murmur** in Spotlight or
-the Applications folder.
+the Applications folder. Murmur registers itself to start at login; turn that off from the
+menu-bar icon if you prefer.
 
 ## Use
 
@@ -80,33 +99,41 @@ controls. Its label and the menu-bar icon reflect whether Murmur is listening, p
 
 ## Google Meet recording
 
-### First-time setup
+### First-time Arc setup
 
 1. From the Murmur menu-bar icon, choose **Set Up Google Meet in Arc…**.
 2. In `arc://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the
-   revealed `ArcExtension` folder.
+   `ArcExtension` folder that Finder reveals. It is bundled inside Murmur, so friends do not need
+   to find the cloned repository after installation.
 3. Grant Murmur **Screen & System Audio Recording** when macOS asks. Murmur captures audio only;
    it does not save meeting video or screenshots.
 
-When **Automatically record joined Google Meets** is enabled in the dashboard settings, Murmur
-starts only after the Meet call UI shows that you joined. Hanging up, closing the tab, or losing the
-extension heartbeat safely stops recording and begins transcription.
+When you join a Google Meet, Murmur shows a five-second **Record this meeting?** prompt. Choose
+**Record** to begin. Press `×` or let the prompt expire to skip it. It never starts recording a
+Meet silently, never joins as a bot, and never controls, leaves, or closes the call.
+
+After you leave the call, Murmur waits through brief Google Meet UI changes before it stops capture
+and transcribes. This avoids accidental split transcripts when Meet rebuilds its controls.
 
 Choose **Open Dashboard…** to view meeting status, transcripts, summaries, Q&A, retention settings,
-or to start a manual meeting recording. Audio is written in five-minute crash-recoverable chunks.
+pin or delete recordings, copy a full transcript or selected excerpt, and start a manual **Audio
+note** recording. Audio is written in five-minute crash-recoverable chunks.
+
+The dashboard labels local channels as **You** (microphone) and **Others** (system audio). It does
+not yet identify individual remote participants by name.
 
 ### Meeting summaries
 
-- **ChatGPT (Codex):** uses the locally installed Codex CLI and its existing ChatGPT login.
-- **Claude:** uses `claude -p`; sign in with `claude login` first.
-- **Gemini:** uses Gemini CLI. Configure a Gemini API key or Vertex service-account JSON, project,
-  and location from Meeting settings.
+- **ChatGPT (Codex):** install and sign in to the Codex CLI. Murmur uses its existing ChatGPT
+  login, with the model selected in **Dashboard → Settings → AI Providers**.
+- **Claude:** install the Claude CLI and run `claude login`. Murmur uses `claude -p` with the
+  selected model.
+- **Gemini:** add a Gemini API key, or a Vertex service-account JSON path, project, and location
+  in **Dashboard → Settings → AI Providers**. Vertex usage also requires the `gcloud` CLI.
 
 Only transcript text is sent to the selected summary provider. Audio remains local. Transcription
-itself always stays on-device.
-
-Murmur adds itself to your Login Items on first launch, so it's always running and the hotkeys are
-always available. You can turn this off from the menu-bar mic icon → **Start at Login**.
+itself always stays on-device. If no provider is connected, Murmur preserves the transcript and
+shows how to connect one; it does not fail the recording.
 
 ## How it works
 
@@ -132,8 +159,9 @@ With `./setup-signing.sh` run once, rebuilds keep your permissions (no re-granti
 ./Tests/run-tests.sh
 ```
 
-The tests cover recording-control availability across idle, listening, paused, and processing
-states, plus app-aware formatting selection.
+The test suite covers recording controls, pause/resume, formatting selection, provider choices,
+meeting timeline offsets, retention, Google Meet bridge configuration, consent safeguards, and
+extension syntax.
 
 ## Troubleshooting
 
@@ -144,4 +172,12 @@ states, plus app-aware formatting selection.
   transcript as a fallback.
 - **Nothing is typed:** ensure **Accessibility** is ON for Murmur.
 - **Permissions reset after a rebuild:** run `./setup-signing.sh` once, then `./build.sh` again.
+- **Google Meet prompt never appears:** confirm the unpacked Murmur extension is enabled in
+  `arc://extensions`, then click **Reload** on its card after rebuilding Murmur. Also confirm
+  Murmur is running (menu-bar waveform icon).
+- **Meeting has no remote audio:** enable **Screen & System Audio Recording** for Murmur, then
+  quit and reopen it. Headphones and a selected headset microphone are supported; remote voices
+  come from the system-audio track even while you are muted.
+- **A brief or answer says no provider is connected:** open **Dashboard → Settings → AI Providers**
+  and sign in or add the relevant Gemini/Vertex credentials.
 - **Logs:** menu-bar icon → **Open Log**, or open `~/Library/Logs/Murmur.log`.
