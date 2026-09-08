@@ -20,13 +20,13 @@ private final class ResumeOnce {
     }
 }
 
-// Wraps the on-device SpeechAnalyzer/SpeechTranscriber (macOS 26) for live dictation.
-// A fresh session is created per recording; assets are installed once.
+// File-based on-device transcription used by the meeting pipeline.
+// A fresh SpeechAnalyzer session is created for each recorded audio chunk.
 //
 // Cross-thread state (feed() runs on the real-time audio thread; finish/cancel/reset run on the
 // main actor) is guarded by stateLock. Whoever CLAIMS the analyzer owns its teardown, so a
 // finalize and a force-cancel can never run against the same analyzer at the same time.
-final class LiveTranscriber: @unchecked Sendable {
+final class OnDeviceTranscriber: @unchecked Sendable {
     private let stateLock = NSLock()
     private var transcriber: SpeechTranscriber?
     private var analyzer: SpeechAnalyzer?
@@ -68,22 +68,7 @@ final class LiveTranscriber: @unchecked Sendable {
         return inputCont
     }
 
-    // Install the language model assets up front so the first recording is instant.
-    func prepareAssets() async throws {
-        let t = SpeechTranscriber(locale: Locale(identifier: Config.localeID),
-                                  transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
-        if let request = try await AssetInventory.assetInstallationRequest(supporting: [t]) {
-            Log.info("downloading speech model assets…")
-            try await request.downloadAndInstall()
-            Log.info("speech assets installed")
-        } else {
-            Log.info("speech assets already present")
-        }
-        assetsInstalled = true
-    }
-
-    // Begin a new transcription session. Returns the audio format buffers must be fed in.
-    func startSession() async throws -> AVAudioFormat {
+    private func startSession() async throws -> AVAudioFormat {
         let t = SpeechTranscriber(locale: Locale(identifier: Config.localeID),
                                   transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
         if !assetsInstalled, let request = try await AssetInventory.assetInstallationRequest(supporting: [t]) {
@@ -125,14 +110,14 @@ final class LiveTranscriber: @unchecked Sendable {
         return format
     }
 
-    func feed(_ buffer: AVAudioPCMBuffer) {
+    private func feed(_ buffer: AVAudioPCMBuffer) {
         currentStream()?.yield(AnalyzerInput(buffer: buffer))
     }
 
     // Returns in ≤6s no matter what. We bank final results as they arrive and return the banked
     // text — never waiting for the results sequence to close (it doesn't, with live mic). A wedged
     // finalize is abandoned and force-stopped, so finish() can never hang the UI.
-    func finish() async -> String {
+    private func finish() async -> String {
         let analyzer = claimAnalyzer()           // exclusive teardown ownership
         let hadCollector = collector != nil
         currentStream()?.finish()
@@ -158,9 +143,7 @@ final class LiveTranscriber: @unchecked Sendable {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    // Tear down the current session immediately — used by the universal reset. If finish() already
-    // claimed the analyzer, this is a no-op for it (no double teardown).
-    func cancel() {
+    private func cancel() {
         let analyzer = claimAnalyzer()
         currentStream()?.finish()
         collector?.cancel()
@@ -182,8 +165,7 @@ final class LiveTranscriber: @unchecked Sendable {
         resetText()
     }
 
-    // Convenience used by --selftest: transcribe a whole audio file.
-    func transcribe(fileURL: URL) async throws -> String {
+    private func transcribe(fileURL: URL) async throws -> String {
         let format = try await startSession()
         let file = try AVAudioFile(forReading: fileURL)
         let srcFormat = file.processingFormat

@@ -1,74 +1,4 @@
 import AppKit
-import AVFoundation
-
-func runLevelTest(_ arguments: [String]) {
-    guard let index = arguments.firstIndex(of: "--leveltest"), index + 1 < arguments.count else {
-        print("usage: Murmur --leveltest <audiofile>")
-        exit(2)
-    }
-    guard let analyzer = SpectrumAnalyzer(size: 1024) else { print("analyzer init failed"); exit(1) }
-    do {
-        let file = try AVAudioFile(forReading: URL(fileURLWithPath: arguments[index + 1]))
-        let format = file.processingFormat
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)),
-              file.length > 0 else { print("empty file"); exit(1) }
-        try file.read(into: buffer)
-        guard let channel = buffer.floatChannelData else { print("no float channel data"); exit(1) }
-
-        let total = Int(buffer.frameLength)
-        let window = 1024
-        let frames = 12
-        let step = max(window, (total - window) / (frames - 1))
-        for i in 0..<frames {
-            let t = i * step
-            if t + window > total { break }
-            let bands = analyzer.analyze(channel[0].advanced(by: t), count: window, bandCount: Config.barCount)
-            print(String(format: "frame %2d:", i) + " " + bands.map { String(format: "%.4f", $0) }.joined(separator: " "))
-        }
-    } catch {
-        print("ERROR: \(error)")
-    }
-    exit(0)
-}
-
-func runSelfTest(_ arguments: [String]) {
-    guard let index = arguments.firstIndex(of: "--selftest"), index + 1 < arguments.count else {
-        print("usage: Murmur --selftest <audiofile>")
-        exit(2)
-    }
-    let path = arguments[index + 1]
-    let transcriber = LiveTranscriber()
-    Task {
-        do {
-            let raw = try await transcriber.transcribe(fileURL: URL(fileURLWithPath: path))
-            print("RAW:\n\(raw)\n")
-            let formatted = await TextFormatter.format(raw, style: Config.defaultStyle)
-            print("FORMATTED:\n\(formatted)")
-        } catch {
-            print("ERROR: \(error)")
-        }
-        DispatchQueue.main.async { CFRunLoopStop(CFRunLoopGetMain()) }
-    }
-    CFRunLoopRun()
-}
-
-func runFormatTest(_ arguments: [String]) {
-    guard let index = arguments.firstIndex(of: "--format"), index + 1 < arguments.count else {
-        print("usage: Murmur --format \"<text>\" [--app <name>]")
-        exit(2)
-    }
-    let text = arguments[index + 1]
-    var appName: String?
-    if let a = arguments.firstIndex(of: "--app"), a + 1 < arguments.count { appName = arguments[a + 1] }
-    let style = Config.style(bundleID: nil, appName: appName)
-    Task {
-        let out = await TextFormatter.format(text, style: style)
-        print("[style: \(style.name), app: \(appName ?? "—")]")
-        print(out)
-        DispatchQueue.main.async { CFRunLoopStop(CFRunLoopGetMain()) }
-    }
-    CFRunLoopRun()
-}
 
 func runMeetingProviderTest(_ arguments: [String]) {
     guard let index = arguments.firstIndex(of: "--meeting-provider-test"), index + 1 < arguments.count else {
@@ -88,6 +18,57 @@ func runMeetingProviderTest(_ arguments: [String]) {
                 transcript: "[00:00:01] You: The synthetic test decision is to ship Friday.",
                 provider: provider)
             print(result)
+            exit(0)
+        } catch { print("ERROR: \(error.localizedDescription)"); exit(1) }
+    }
+    dispatchMain()
+}
+
+// Re-runs the full post-recording pipeline (mix to mp3 -> chosen engine -> structured transcript)
+// against a meeting that is already on disk, so the whole path can be exercised without sitting
+// through a live call.
+func runMeetingTranscribe(_ arguments: [String]) {
+    guard let index = arguments.firstIndex(of: "--transcribe-meeting"), index + 1 < arguments.count,
+          let id = UUID(uuidString: arguments[index + 1]),
+          var meeting = MeetingStore.shared.loadAll().first(where: { $0.id == id }) else {
+        print("usage: Murmur --transcribe-meeting <meeting-uuid> [--engine gemini|local] [--dry-run]")
+        exit(2)
+    }
+    var engine = MeetingTranscriptionEngine.current
+    if let e = arguments.firstIndex(of: "--engine"), e + 1 < arguments.count {
+        engine = arguments[e + 1].lowercased() == "local" ? .local : .gemini
+    }
+    let dryRun = arguments.contains("--dry-run")
+    Task {
+        do {
+            let directory = try MeetingStore.shared.meetingDirectory(id: meeting.id)
+            let started = Date()
+            let outcome = try await MeetingTranscriptionPipeline().run(
+                system: meeting.systemAudioPaths.map { URL(fileURLWithPath: $0) },
+                microphone: meeting.microphoneAudioPaths.map { URL(fileURLWithPath: $0) },
+                directory: directory, engine: engine)
+            print("engine:   \(outcome.engine)")
+            print("audio:    \(outcome.audioPath ?? "—")")
+            print("elapsed:  \(Int(Date().timeIntervalSince(started)))s")
+            if let warning = outcome.warning, !warning.isEmpty { print("warning:  \(warning)") }
+            if let structured = outcome.structured {
+                print("speakers: " + structured.speakers
+                    .map { "\($0.displayName)\($0.isPrimaryUser ? " (you)" : "")" }.joined(separator: ", "))
+                print("turns:    \(structured.utterances.count)")
+                print("covers:   \(MeetingStructuredTranscript.timestamp(structured.utterances.last?.end ?? 0))")
+            }
+            print("---")
+            print(outcome.text.prefix(1200))
+            if !dryRun {
+                meeting.transcript = outcome.text
+                meeting.structured = outcome.structured
+                meeting.transcriptEngine = outcome.engine
+                meeting.audioPath = outcome.audioPath
+                meeting.status = .ready
+                meeting.error = outcome.text.isEmpty ? "No speech was detected" : outcome.warning
+                try MeetingStore.shared.save(meeting)
+                print("--- saved to \(directory.path)/meeting.json")
+            }
             exit(0)
         } catch { print("ERROR: \(error.localizedDescription)"); exit(1) }
     }
@@ -119,22 +100,17 @@ func runMeetingRepair(_ arguments: [String]) {
 }
 
 let arguments = CommandLine.arguments
-if arguments.contains("--leveltest") {
-    runLevelTest(arguments)
-} else if arguments.contains("--format") {
-    runFormatTest(arguments)
-} else if arguments.contains("--selftest") {
-    runSelfTest(arguments)
-} else if arguments.contains("--meeting-provider-test") {
+if arguments.contains("--meeting-provider-test") {
     runMeetingProviderTest(arguments)
+} else if arguments.contains("--transcribe-meeting") {
+    runMeetingTranscribe(arguments)
 } else if arguments.contains("--repair-meeting") {
     runMeetingRepair(arguments)
 } else {
     let app = NSApplication.shared
     let controller = MainActor.assumeIsolated { AppController() }
     app.delegate = controller
-    // V2 has a real dashboard. A regular activation policy keeps it visible in Cmd-Tab and the
-    // Dock while preserving the menu-bar controls used by dictation.
+    // A regular activation policy keeps the meeting dashboard visible in Cmd-Tab and the Dock.
     app.setActivationPolicy(.regular)
     app.run()
 }

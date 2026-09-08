@@ -11,38 +11,6 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
-expect(!RecordingState.idle.canPauseOrResume, "idle cannot pause")
-expect(Config.maxRecordingSeconds >= 10_800, "long dictation is never cancelled after a few minutes")
-expect(!RecordingState.idle.canFinish, "idle cannot finish")
-expect(!RecordingState.idle.canCancel, "idle cannot cancel")
-
-expect(RecordingState.recording.canPauseOrResume, "recording can pause")
-expect(RecordingState.recording.canFinish, "recording can finish")
-expect(RecordingState.recording.canCancel, "recording can cancel")
-expect(!RecordingState.recording.canPauseOrResume(recorderReady: false, pushToTalk: false),
-       "recording cannot pause before microphone startup completes")
-expect(!RecordingState.recording.canPauseOrResume(recorderReady: true, pushToTalk: true),
-       "push-to-talk recording cannot be paused")
-expect(RecordingState.recording.canPauseOrResume(recorderReady: true, pushToTalk: false),
-       "ready hands-free recording can be paused")
-
-expect(RecordingState.paused.canPauseOrResume, "paused recording can resume")
-expect(RecordingState.paused.canFinish, "paused recording can finish without losing text")
-expect(RecordingState.paused.canCancel, "paused recording can cancel")
-
-expect(!RecordingState.processing.canPauseOrResume, "processing cannot pause")
-expect(!RecordingState.processing.canFinish, "processing cannot finish twice")
-expect(RecordingState.processing.canCancel, "processing remains cancellable")
-
-for app in ["WhatsApp", "Messages", "Signal"] {
-    expect(Config.style(bundleID: nil, appName: app).name == "casual", "\(app) uses casual formatting")
-}
-for app in ["Slack", "Microsoft Teams", "Discord"] {
-    expect(Config.style(bundleID: nil, appName: app).name == "structured", "\(app) uses structured formatting")
-}
-expect(Config.style(bundleID: "com.apple.TextEdit", appName: "TextEdit").name == "default",
-       "unknown apps use balanced formatting")
-
 expect(MeetingSummaryProvider.codex.defaultModel == "gpt-5.6-luna", "ChatGPT defaults to Luna")
 expect(MeetingSummaryProvider.claude.defaultModel == "claude-sonnet-5", "Claude defaults to Sonnet 5")
 expect(MeetingSummaryProvider.codex.modelOptions.count == 3, "all requested GPT-5.6 models are selectable")
@@ -76,6 +44,48 @@ do {
     expect(false, "meeting store operations succeed: \(error)")
 }
 try? FileManager.default.removeItem(at: storeRoot)
+
+// ---- structured transcript ----------------------------------------------------------------
+let structured = MeetingStructuredTranscript(
+    speakers: [
+        MeetingSpeaker(id: "spk_1", displayName: "Amit", isPrimaryUser: false, evidence: "thanks Amit"),
+        MeetingSpeaker(id: "spk_2", displayName: "Gautam", isPrimaryUser: true, evidence: nil),
+        MeetingSpeaker(id: "spk_3", displayName: "You", isPrimaryUser: true, evidence: nil),
+    ],
+    utterances: [
+        MeetingUtterance(start: 5, end: 9, speakerId: "spk_1", text: "Did the deploy land?"),
+        MeetingUtterance(start: 3661, end: 3665, speakerId: "spk_2", text: "Yes, this morning."),
+    ],
+    engine: "Gemini", model: "gemini-3.1-pro-preview", generatedAt: Date())
+
+expect(MeetingStructuredTranscript.timestamp(3661) == "01:01:01", "timestamps render as hh:mm:ss")
+expect(MeetingStructuredTranscript.timestamp(-5) == "00:00:00", "negative offsets clamp to zero")
+expect(structured.name(for: "spk_1") == "Amit", "other speakers keep their spoken name")
+expect(structured.name(for: "spk_2") == "Gautam (you)", "a named device owner is marked as you")
+expect(structured.name(for: "spk_3") == "You", "an unnamed device owner is not labelled twice")
+expect(structured.name(for: "nope") == "Unknown", "an unknown speaker id still renders")
+expect(structured.plainText == "[00:00:05] Amit: Did the deploy land?\n\n[01:01:01] Gautam (you): Yes, this morning.",
+       "structured transcripts flatten to the text every other feature reads")
+expect(structured.speakers[0].colorIndex == structured.speakers[0].colorIndex,
+       "speaker colour is stable for one id")
+
+// A meeting recorded before this feature has no structured transcript and must still decode.
+let legacy = """
+{"id":"\(UUID().uuidString)","title":"Legacy","startedAt":"2026-08-01T09:00:00Z",
+ "status":"ready","source":"manual","systemAudioPaths":[],"microphoneAudioPaths":[],
+ "transcript":"[00:00:01] You: hi","summary":"","isPinned":false}
+"""
+let legacyDecoder = JSONDecoder()
+legacyDecoder.dateDecodingStrategy = .iso8601
+if let decoded = try? legacyDecoder.decode(MeetingRecord.self, from: Data(legacy.utf8)) {
+    expect(decoded.structured == nil, "meetings recorded before diarization still load")
+    expect(decoded.audioPath == nil, "older meetings simply have no exported audio")
+} else {
+    expect(false, "meetings recorded before diarization still load")
+}
+
+expect(MeetingTranscriptionEngine.gemini.shortName == "Gemini", "engine has a short label for badges")
+expect(MeetingTranscriptionEngine.allCases.count == 2, "the engine picker offers cloud and on-device")
 
 if failures > 0 {
     print("\n\(failures) test(s) failed")

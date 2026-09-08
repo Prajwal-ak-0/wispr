@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Creates a stable, self-signed code-signing identity in a dedicated keychain so that
-# rebuilds keep the same signature — macOS then remembers Input Monitoring / Accessibility
+# Rebuilds keep the same signature so macOS remembers meeting capture permissions.
 # grants across rebuilds. Fully local; nothing is added to the system trust store.
 
 IDENTITY="Murmur Self-Signed"

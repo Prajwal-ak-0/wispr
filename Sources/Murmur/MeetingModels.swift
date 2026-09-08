@@ -37,6 +37,81 @@ enum MeetingSummaryProvider: String, Codable, CaseIterable, Identifiable {
     var modelDefaultsKey: String { "meetingModel.\(id)" }
 }
 
+// Which engine produces meeting transcripts. Cloud transcription is diarized and names speakers;
+// the on-device engine is the privacy-preserving fallback and always works offline.
+enum MeetingTranscriptionEngine: String, Codable, CaseIterable, Identifiable {
+    case gemini = "Gemini (cloud)"
+    case local = "On-device"
+
+    var id: String { rawValue }
+    var shortName: String { self == .gemini ? "Gemini" : "On-device" }
+    var detail: String {
+        switch self {
+        case .gemini: return "Uploads meeting audio to Vertex AI. Names speakers and separates every voice."
+        case .local: return "Never leaves this Mac. Splits your voice from everyone else's, without names."
+        }
+    }
+    static let defaultsKey = "meetingTranscriptionEngine"
+    static var current: MeetingTranscriptionEngine {
+        guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
+              let engine = MeetingTranscriptionEngine(rawValue: raw) else { return .gemini }
+        return engine
+    }
+}
+
+struct MeetingSpeaker: Codable, Equatable, Identifiable {
+    var id: String
+    var displayName: String
+    var isPrimaryUser: Bool
+    var evidence: String?
+
+    // Stable per-speaker tint so the same voice keeps its colour down the whole transcript.
+    var colorIndex: Int { abs(id.hashValue) % 6 }
+}
+
+struct MeetingUtterance: Codable, Equatable, Identifiable {
+    var start: TimeInterval
+    var end: TimeInterval
+    var speakerId: String
+    var text: String
+
+    // Identity for list rendering: two turns can share a start second, so the span and length
+    // participate too.
+    var id: String { "\(start)-\(end)-\(speakerId)-\(text.count)-\(text.prefix(24))" }
+    var timestamp: String { MeetingStructuredTranscript.timestamp(start) }
+}
+
+struct MeetingStructuredTranscript: Codable, Equatable {
+    var speakers: [MeetingSpeaker]
+    var utterances: [MeetingUtterance]
+    var engine: String
+    var model: String?
+    var generatedAt: Date
+    // Set when part of the meeting could not be transcribed, so the gap is stated rather than
+    // silently absent.
+    var note: String?
+
+    func speaker(_ id: String) -> MeetingSpeaker? { speakers.first { $0.id == id } }
+
+    func name(for id: String) -> String {
+        guard let speaker = speaker(id) else { return "Unknown" }
+        return speaker.isPrimaryUser && speaker.displayName.caseInsensitiveCompare("You") != .orderedSame
+            ? "\(speaker.displayName) (you)" : speaker.displayName
+    }
+
+    // The flat rendering every existing feature already understands: search, briefs, and Q&A all
+    // read MeetingRecord.transcript, so structured output stays additive rather than a migration.
+    var plainText: String {
+        utterances.map { "[\($0.timestamp)] \(name(for: $0.speakerId)): \($0.text)" }
+            .joined(separator: "\n\n")
+    }
+
+    static func timestamp(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+    }
+}
+
 struct MeetingRecord: Codable, Identifiable, Equatable {
     let id: UUID
     var title: String
@@ -51,6 +126,10 @@ struct MeetingRecord: Codable, Identifiable, Equatable {
     var summaryProvider: MeetingSummaryProvider?
     var error: String?
     var isPinned: Bool
+    // Added after v1: absent in older meeting.json files, which still decode cleanly.
+    var structured: MeetingStructuredTranscript?
+    var transcriptEngine: String?
+    var audioPath: String?
 
     var duration: TimeInterval { (endedAt ?? Date()).timeIntervalSince(startedAt) }
 }

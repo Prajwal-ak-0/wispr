@@ -23,7 +23,7 @@ final class MeetingCoordinator: ObservableObject {
 
     private let store = MeetingStore.shared
     private let recorder = MeetingAudioRecorder()
-    private let transcription = MeetingTranscriptionService()
+    private let transcription = MeetingTranscriptionPipeline()
     private let llm = MeetingLLMService()
     private var dashboard: MeetingDashboardController?
     private var stopTask: Task<Void, Never>?
@@ -34,6 +34,21 @@ final class MeetingCoordinator: ObservableObject {
         get { MeetingSummaryProvider(rawValue: UserDefaults.standard.string(forKey: "meetingSummaryProvider") ?? "") ?? .codex }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "meetingSummaryProvider"); objectWillChange.send() }
     }
+    var transcriptionEngine: MeetingTranscriptionEngine {
+        get { MeetingTranscriptionEngine.current }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: MeetingTranscriptionEngine.defaultsKey); objectWillChange.send() }
+    }
+    var transcriptionModel: String {
+        get { GeminiTranscriptionSettings.current().model }
+        set {
+            UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines),
+                                      forKey: GeminiTranscriptionSettings.modelDefaultsKey)
+            objectWillChange.send()
+        }
+    }
+
+    var isGeminiTranscriptionReady: Bool { GeminiTranscriptionSettings.current().isConfigured }
+
     var retentionDays: Int {
         get { max(1, UserDefaults.standard.object(forKey: "meetingRetentionDays") as? Int ?? 30) }
         set { UserDefaults.standard.set(max(1, newValue), forKey: "meetingRetentionDays"); objectWillChange.send() }
@@ -130,13 +145,20 @@ final class MeetingCoordinator: ObservableObject {
         reload()
 
         do {
-            meeting.transcript = try await transcription.transcribe(
-                system: artifacts.system, microphone: artifacts.microphone)
+            let directory = try store.meetingDirectory(id: meeting.id)
+            let outcome = try await transcription.run(system: artifacts.system,
+                                                      microphone: artifacts.microphone,
+                                                      directory: directory)
+            meeting.transcript = outcome.text
+            meeting.structured = outcome.structured
+            meeting.transcriptEngine = outcome.engine
+            meeting.audioPath = outcome.audioPath
             meeting.status = .ready
             if meeting.transcript.isEmpty { meeting.error = "No speech was detected" }
+            else { meeting.error = outcome.warning }
             try store.save(meeting)
             onActivity?(.ready(meeting.title))
-            Log.info("meeting transcription ready: \(meeting.id)")
+            Log.info("meeting transcription ready via \(outcome.engine): \(meeting.id)")
             if automaticallyGenerateSummary, !meeting.transcript.isEmpty, await llm.isConfigured(provider) {
                 do {
                     meeting.summary = try await llm.summarize(transcript: meeting.transcript, provider: provider)

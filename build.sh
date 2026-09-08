@@ -45,7 +45,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>  <string>26.0</string>
     <key>LSUIElement</key>             <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Murmur transcribes your speech locally to type it for you.</string>
+    <string>Murmur records your microphone locally for meeting transcription.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Murmur transcribes your speech on-device.</string>
     <key>NSScreenCaptureUsageDescription</key>

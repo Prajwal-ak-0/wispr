@@ -15,6 +15,7 @@ struct MeetingDashboardView: View {
     @State private var showingSettings = false
     @State private var question = ""
     @State private var detailTab: MeetingDetailTab = .overview
+    @State private var showRawTranscript = false
     @State private var geminiKey = MeetingCredentials.geminiAPIKey
     @State private var vertexCredentials = UserDefaults.standard.string(forKey: "vertexCredentialsPath") ?? ""
     @State private var vertexProject = UserDefaults.standard.string(forKey: "vertexProject") ?? ""
@@ -219,14 +220,47 @@ struct MeetingDashboardView: View {
 
     private func transcript(_ meeting: MeetingRecord) -> some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("Full transcript").font(.headline)
+                if let engine = meeting.transcriptEngine {
+                    Text(engine).font(.caption).padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Color.primary.opacity(0.07), in: Capsule()).foregroundStyle(.secondary)
+                }
                 Spacer()
+                if let path = meeting.audioPath, FileManager.default.fileExists(atPath: path) {
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                    } label: { Label("Audio", systemImage: "waveform") }
+                        .buttonStyle(.borderless)
+                        .help("Reveal \(URL(fileURLWithPath: path).lastPathComponent) in Finder")
+                }
+                if meeting.structured?.utterances.isEmpty == false {
+                    Picker("View", selection: $showRawTranscript) {
+                        Text("Speakers").tag(false); Text("Raw").tag(true)
+                    }.pickerStyle(.segmented).labelsHidden().frame(width: 150)
+                }
                 copyButton(meeting.transcript, label: "transcript")
             }.padding(.horizontal, 44).frame(height: 52)
             Divider()
-            SelectableTranscriptView(text: meeting.transcript.isEmpty ? (meeting.error ?? "No transcript yet") : meeting.transcript,
-                                     isPlaceholder: meeting.transcript.isEmpty)
+            // A finished meeting can still carry a note — most often "Gemini was unreachable, this
+            // was transcribed on-device" — which would otherwise be invisible once status is ready.
+            if meeting.status == .ready, let note = meeting.error, !note.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 44).padding(.vertical, 10)
+                .background(Color.orange.opacity(0.08))
+                Divider()
+            }
+            if let structured = meeting.structured, !structured.utterances.isEmpty, !showRawTranscript {
+                StructuredTranscriptView(transcript: structured)
+            } else {
+                SelectableTranscriptView(text: meeting.transcript.isEmpty ? (meeting.error ?? "No transcript yet") : meeting.transcript,
+                                         isPlaceholder: meeting.transcript.isEmpty)
+            }
         }
     }
 
@@ -344,13 +378,40 @@ struct MeetingDashboardView: View {
         VStack(alignment: .leading, spacing: 22) {
             settingsCard("Automation", icon: "bolt.fill") {
                 Label("Google Meet always asks before recording", systemImage: "hand.raised.fill").foregroundStyle(.green)
-                Text("A five-second prompt appears when you join. Choose Record to start; dismiss it or let it time out to skip recording.").font(.caption).foregroundStyle(.secondary)
+                Text("A \(Int(Config.meetOfferSeconds))-second prompt appears when you join. Choose Record to start; dismiss it or let it time out to skip recording.").font(.caption).foregroundStyle(.secondary)
                 Toggle("Automatically create an AI brief after transcription", isOn: Binding(get: { coordinator.automaticallyGenerateSummary }, set: { coordinator.automaticallyGenerateSummary = $0 }))
             }
             settingsCard("Audio & speakers", icon: "waveform") {
                 Label(coordinator.hasSystemAudioPermission ? "System audio access granted" : "System audio access needed", systemImage: coordinator.hasSystemAudioPermission ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                     .foregroundStyle(coordinator.hasSystemAudioPermission ? .green : .orange)
-                Text("Current speaker separation: You and Others. Individual remote-speaker diarization is not installed yet.").font(.caption).foregroundStyle(.secondary)
+                Text(MeetingAudioExporter.ffmpegPath() == nil
+                     ? "Every meeting is mixed into one audio file (.m4a — install ffmpeg for .mp3)."
+                     : "Every meeting is mixed into one .mp3 you can play or share.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            settingsCard("Transcription", icon: "text.bubble") {
+                Picker("Engine", selection: Binding(get: { coordinator.transcriptionEngine },
+                                                    set: { coordinator.transcriptionEngine = $0 })) {
+                    ForEach(MeetingTranscriptionEngine.allCases) { engine in Text(engine.rawValue).tag(engine) }
+                }.pickerStyle(.segmented).labelsHidden()
+                Text(coordinator.transcriptionEngine.detail).font(.caption).foregroundStyle(.secondary)
+                if coordinator.transcriptionEngine == .gemini {
+                    HStack {
+                        Text("Model").foregroundStyle(.secondary)
+                        Picker("Transcription model", selection: Binding(get: { coordinator.transcriptionModel },
+                                                                        set: { coordinator.transcriptionModel = $0 })) {
+                            ForEach(MeetingSummaryProvider.gemini.modelOptions, id: \.id) { option in
+                                Text(option.label).tag(option.id)
+                            }
+                        }.labelsHidden().pickerStyle(.menu).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Label(coordinator.isGeminiTranscriptionReady ? "Vertex service account found" : "Vertex service-account JSON not found — meetings fall back to on-device",
+                          systemImage: coordinator.isGeminiTranscriptionReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(coordinator.isGeminiTranscriptionReady ? .green : .orange)
+                    Text("Set the credentials path under AI Providers → Gemini. On-device transcription is always the fallback.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             settingsCard("Storage", icon: "internaldrive") {
                 Stepper("Delete unpinned meetings after \(coordinator.retentionDays) days", value: Binding(get: { coordinator.retentionDays }, set: { coordinator.retentionDays = $0 }), in: 1...365)
@@ -421,6 +482,89 @@ struct MeetingDashboardView: View {
     }
     private func liveDuration(_ meeting: MeetingRecord) -> TimeInterval {
         (meeting.endedAt ?? clock).timeIntervalSince(meeting.startedAt)
+    }
+}
+
+// Speaker-attributed transcript: one block per utterance, tinted and named per voice, so a reader
+// can follow who said what instead of a wall of "You / Others".
+private struct StructuredTranscriptView: View {
+    let transcript: MeetingStructuredTranscript
+
+    private static let palette: [Color] = [.blue, .purple, .orange, .teal, .pink, .indigo]
+    private func color(_ speakerId: String) -> Color {
+        guard let speaker = transcript.speaker(speakerId) else { return .gray }
+        return Self.palette[speaker.colorIndex % Self.palette.count]
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                speakerLegend
+                ForEach(transcript.utterances) { utterance in
+                    HStack(alignment: .top, spacing: 14) {
+                        Text(utterance.timestamp)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.tertiary).frame(width: 62, alignment: .leading).padding(.top, 3)
+                        RoundedRectangle(cornerRadius: 2).fill(color(utterance.speakerId).opacity(0.6)).frame(width: 3)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(transcript.name(for: utterance.speakerId))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(color(utterance.speakerId))
+                            Text(utterance.text).font(.system(size: 13.5)).textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }.padding(.horizontal, 44).padding(.vertical, 24).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var speakerLegend: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(transcript.speakers.count) speakers · \(transcript.utterances.count) turns")
+                .font(.caption).foregroundStyle(.secondary)
+            FlowRow {
+                ForEach(transcript.speakers) { speaker in
+                    HStack(spacing: 6) {
+                        Circle().fill(Self.palette[speaker.colorIndex % Self.palette.count]).frame(width: 8, height: 8)
+                        Text(transcript.name(for: speaker.id)).font(.system(size: 12, weight: .medium))
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+                    // Names are inferred from what was said aloud, so the evidence stays inspectable.
+                    .help(speaker.evidence.map { "Named from: \u{201C}\($0)\u{201D}" } ?? "Name not spoken in the meeting")
+                }
+            }
+        }.padding(.bottom, 4)
+    }
+}
+
+// Wraps speaker chips onto as many lines as they need.
+private struct FlowRow: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maximum = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, lineHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maximum { x = 0; y += lineHeight + spacing; lineHeight = 0 }
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+        return CGSize(width: maximum == .infinity ? x : maximum, height: y + lineHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, lineHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX { x = bounds.minX; y += lineHeight + spacing; lineHeight = 0 }
+            subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
     }
 }
 

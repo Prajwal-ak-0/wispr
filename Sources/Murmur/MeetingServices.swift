@@ -33,7 +33,7 @@ private final class CompletionGate: @unchecked Sendable {
 }
 
 final class MeetingTranscriptionService: @unchecked Sendable {
-    private let transcriber = LiveTranscriber()
+    private let transcriber = OnDeviceTranscriber()
     private let chunkSeconds = 300.0
 
     func transcribe(system: [URL], microphone: [URL]) async throws -> String {

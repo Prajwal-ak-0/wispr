@@ -33,7 +33,7 @@ final class MeetingActivityPanel {
         guard let panel else { return }
         switch activity {
         case .recordingOffer(let name):
-            configure(title: "Record this meeting?", detail: "\(name) · choose within 5 seconds", color: .systemGreen, processing: false, canStop: false)
+            configure(title: "Record this meeting?", detail: "\(name) · choose within \(Int(Config.meetOfferSeconds)) seconds", color: .systemGreen, processing: false, canStop: false)
             stopButton?.isHidden = false; stopButton?.title = "Record"; declineButton?.isHidden = false; startCountdown()
         case .starting(let name): configure(title: "Preparing recording", detail: name, color: .systemOrange, processing: true, canStop: true)
         case .recording(let name): configure(title: "Recording meeting", detail: "\(name) · audio stays on this Mac", color: .systemRed, processing: false, canStop: true)
@@ -47,7 +47,7 @@ final class MeetingActivityPanel {
         position(panel)
         panel.orderFrontRegardless()
         let delay: TimeInterval
-        if case .recordingOffer = activity { delay = 5 } else { delay = 3 }
+        if case .recordingOffer = activity { delay = Config.meetOfferSeconds } else { delay = 3 }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard self?.generation == currentGeneration else { return }
             self?.panel?.orderOut(nil); self?.countdownLayer?.removeAllAnimations(); self?.onDeclineRecording?()
@@ -132,7 +132,7 @@ final class MeetingActivityPanel {
         ring.lineWidth = 2; ring.strokeEnd = 1
         container.layer?.addSublayer(ring); countdownLayer = ring
         let animation = CABasicAnimation(keyPath: "strokeEnd")
-        animation.fromValue = 1; animation.toValue = 0; animation.duration = 5
+        animation.fromValue = 1; animation.toValue = 0; animation.duration = Config.meetOfferSeconds
         animation.timingFunction = CAMediaTimingFunction(name: .linear)
         ring.add(animation, forKey: "countdown"); ring.strokeEnd = 0
     }
