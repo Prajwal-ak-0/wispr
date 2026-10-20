@@ -241,12 +241,13 @@ final class MeetingLLMService: @unchecked Sendable {
 
     private func runVertex(prompt: String, model: String, credentials: String,
                            project: String, location: String) async throws -> String {
-        guard !project.isEmpty, FileManager.default.fileExists(atPath: credentials) else {
-            throw MeetingLLMError.unavailable("Vertex credentials")
-        }
-        let token = try await run(executable: "/opt/homebrew/bin/gcloud",
-                                  arguments: ["auth", "application-default", "print-access-token"], stdin: "",
-                                  environment: ["GOOGLE_APPLICATION_CREDENTIALS": credentials])
+        // Same in-app JWT exchange as transcription: shelling out to gcloud breaks whenever the
+        // app's environment resolves gcloud to an unsupported Python.
+        let account: VertexServiceAccount
+        do { account = try VertexServiceAccount.load(path: credentials) }
+        catch { throw MeetingLLMError.unavailable("Vertex credentials") }
+        let project = project.isEmpty ? account.projectID : project
+        let token = try await VertexTokenProvider.shared.accessToken(for: account)
         let host = location == "global" ? "aiplatform.googleapis.com" : "\(location)-aiplatform.googleapis.com"
         guard let url = URL(string: "https://\(host)/v1/projects/\(project)/locations/\(location)/publishers/google/models/\(model):generateContent") else {
             throw MeetingLLMError.failed("Invalid Vertex configuration")

@@ -97,7 +97,8 @@ not yet identify individual remote participants by name.
 - **Claude:** install the Claude CLI and run `claude login`. Murmur uses `claude -p` with the
   selected model.
 - **Gemini:** add a Gemini API key, or a Vertex service-account JSON path, project, and location
-  in **Dashboard → Settings → AI Providers**. Vertex usage also requires the `gcloud` CLI.
+  in **Dashboard → Settings → AI Providers**. Vertex needs no `gcloud`: Murmur signs its own token
+  from the service-account JSON.
 
 Only transcript text is sent to the selected summary provider. If no provider is connected, Murmur
 preserves the transcript and shows how to connect one; it does not fail the recording.
